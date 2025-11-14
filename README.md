@@ -157,4 +157,3 @@ mcp-session-closer/
 ## License
 
 MIT
-
