@@ -1,21 +1,18 @@
-# Session Closer MCP Server
+# MCP Session Closer
 
-A personal Model Context Protocol (MCP) server for Cursor that automatically closes work sessions, syncs context files, updates Agent OS files, and commits changes to git.
+A Model Context Protocol (MCP) server for Cursor that gracefully closes work sessions, syncs context files, updates Agent OS files, and commits changes to git.
 
 ## Features
 
-- ✅ **Automatic Session Closing** - Close Cursor sessions with a single command
-- ✅ **Context File Sync** - Keeps `claude.md`, `gemini.md`, `agents.md`, and `.cursor/context.md` in sync
-- ✅ **Agent OS Integration** - Updates roadmap, decisions, and session summaries
-- ✅ **Git Integration** - Automatically commits changes with descriptive messages
-- ✅ **Cross-Repo** - Works across all your repositories in Cursor
+* **end_session**: Close Cursor sessions with automatic context sync and git commit
+* **sync_context_files**: Sync context files across `claude.md`, `gemini.md`, `agents.md`, and `.cursor/context.md`
+* **update_session_summary**: Update session summaries without closing the session
 
-## Installation
+## Quick Setup
 
 ### 1. Install Dependencies
 
 ```bash
-cd C:\Users\tylar\code\mcp-session-closer
 npm install
 ```
 
@@ -27,7 +24,7 @@ npm run build
 
 ### 3. Configure Cursor
 
-Add to your Cursor MCP settings. Open Cursor Settings → Features → MCP, and add:
+Add to your Cursor MCP settings (`~/.cursor/mcp.json` or `%APPDATA%\Cursor\mcp.json` on Windows):
 
 ```json
 {
@@ -35,7 +32,7 @@ Add to your Cursor MCP settings. Open Cursor Settings → Features → MCP, and 
     "session-closer": {
       "command": "node",
       "args": [
-        "C:\\Users\\tylar\\code\\mcp-session-closer\\dist\\index.js"
+        "/path/to/mcp-session-closer/dist/index.js"
       ],
       "env": {
         "CURSOR_WORKSPACE": "${workspaceFolder}"
@@ -45,28 +42,45 @@ Add to your Cursor MCP settings. Open Cursor Settings → Features → MCP, and 
 }
 ```
 
-Or edit the MCP config file directly at `~/.cursor/mcp.json` (or `%APPDATA%\Cursor\mcp.json` on Windows).
+**Note**: Replace `/path/to/mcp-session-closer` with your actual path. On Windows, use forward slashes or double backslashes.
+
+### 4. Restart Cursor
+
+Restart Cursor to load the MCP server.
 
 ## Usage
 
 ### End Session
 
-In Cursor chat, simply say:
+In Cursor chat, simply ask:
 
 ```
-Use the end_session tool to close this session
+Close this session and sync everything
 ```
 
-Or be more specific:
+Or use the tool directly:
 
 ```
-Use end_session with conversationSummary: "Implemented user authentication, created login page, added password hashing"
+Use end_session with conversationSummary: "Implemented user auth, fixed login bugs"
 ```
 
-### Sync Context Files (Without Closing)
+The server will:
+1. Extract session details (accomplishments, decisions, blockers, next steps)
+2. Update `.agent-os/session-summary.md`
+3. Update Agent OS roadmap and decisions (if present)
+4. Sync all context files (`claude.md`, `gemini.md`, `agents.md`, `.cursor/context.md`)
+5. Commit all changes to git with descriptive message
+
+### Sync Context Files Only
 
 ```
-Use sync_context_files tool
+Sync context files
+```
+
+Or:
+
+```
+Use sync_context_files
 ```
 
 ### Update Session Summary Only
@@ -75,30 +89,57 @@ Use sync_context_files tool
 Use update_session_summary with summary: "Made progress on feature X"
 ```
 
-## What It Does
+## How It Works
 
-When you call `end_session`, the server:
+### Session Closing Flow
 
-1. **Gathers Session Summary**
-   - Extracts accomplishments, decisions, blockers, and next steps
-   - Identifies changed files
+When you call `end_session`, the server automatically:
+
+1. **Gathers Session Info**
+   - Extracts accomplishments from conversation
+   - Identifies decisions made
+   - Notes any blockers
+   - Lists next steps
+   - Tracks changed files
 
 2. **Updates Session Summary**
-   - Appends to `.agent-os/session-summary.md`
-   - Creates file if it doesn't exist
+   - Creates/updates `.agent-os/session-summary.md`
+   - Appends session details with timestamp
+   - Formats as structured markdown
 
-3. **Updates Agent OS Files** (if present)
-   - Updates `.agent-os/product/roadmap.md` (marks completed items)
-   - Updates `.agent-os/product/decisions.md` (adds new decisions)
+3. **Updates Agent OS** (if present)
+   - Marks completed items in `.agent-os/product/roadmap.md`
+   - Adds new decisions to `.agent-os/product/decisions.md`
+   - Maintains proper markdown structure
 
 4. **Syncs Context Files**
-   - Updates `claude.md`, `gemini.md`, `agents.md`, `.cursor/context.md`
-   - Keeps all files identical with unified project context
+   - Reads content from all context files
+   - Merges and deduplicates content
+   - Updates all files with unified context:
+     - `claude.md`
+     - `gemini.md`
+     - `agents.md`
+     - `.cursor/context.md`
 
 5. **Commits to Git**
-   - Stages all changes
+   - Stages all modified files
    - Creates descriptive commit message
-   - Commits with proper format
+   - Commits with timestamp
+
+## Configuration
+
+### Required Environment Variables
+
+* `CURSOR_WORKSPACE` - Set automatically by Cursor to the current workspace folder
+
+### Optional Files
+
+The server works with or without these files:
+
+* `.agent-os/session-summary.md` - Session history (created if missing)
+* `.agent-os/product/roadmap.md` - Product roadmap (updated if present)
+* `.agent-os/product/decisions.md` - Decision log (updated if present)
+* `claude.md`, `gemini.md`, `agents.md`, `.cursor/context.md` - Context files
 
 ## Development
 
@@ -122,38 +163,72 @@ npm start
 
 ## Troubleshooting
 
-### Server Not Found
+### MCP Server Not Found
 
-Make sure the path in Cursor MCP config is correct and uses forward slashes or escaped backslashes on Windows.
+* Verify the path in Cursor MCP config is correct
+* Use forward slashes or escaped backslashes on Windows
+* Check that `dist/index.js` exists after building
 
 ### Git Commit Fails
 
-Ensure:
-- Git is initialized in your project (`git init`)
-- Git user name and email are configured
-- You have write permissions
+* Ensure git is initialized: `git init`
+* Configure git user:
+  ```bash
+  git config user.name "Your Name"
+  git config user.email "your.email@example.com"
+  ```
+* Check you have write permissions
 
 ### Context Files Not Syncing
 
-Check that:
-- You have write permissions in the project directory
-- The project directory path is correct
-- No other processes are locking the files
+* Verify write permissions in the workspace directory
+* Check that no other processes are locking the files
+* Ensure the workspace path is correct
+
+### Session Summary Not Updating
+
+* Check that `.agent-os` directory exists (created automatically)
+* Verify write permissions in the workspace
+* Look for errors in Cursor's MCP logs
 
 ## Project Structure
 
 ```
 mcp-session-closer/
 ├── src/
-│   ├── index.ts          # Main MCP server
-│   ├── session-closer.ts # Session closer logic
-│   └── types.ts          # Type definitions
-├── dist/                 # Compiled output
-├── package.json
-├── tsconfig.json
-└── README.md
+│   ├── index.ts          # MCP server implementation
+│   ├── session-closer.ts # Core session closing logic
+│   └── types.ts          # TypeScript type definitions
+├── dist/                 # Compiled JavaScript (generated)
+├── package.json          # Node.js dependencies
+├── tsconfig.json         # TypeScript configuration
+└── README.md            # This file
 ```
+
+## Why Use This?
+
+### Automated Workflow
+
+* **No Manual Steps**: Automatically syncs, updates, and commits
+* **Consistent Format**: Standardized session summaries and git commits
+* **Time Saver**: Closes sessions in seconds, not minutes
+
+### Context Continuity
+
+* **Unified Context**: All AI assistants see the same project context
+* **Cross-Session Memory**: Session summaries persist across restarts
+* **Decision Tracking**: Maintains history of why decisions were made
+
+### Git Integration
+
+* **Automatic Commits**: Never forget to commit your work
+* **Descriptive Messages**: Auto-generated commit messages with context
+* **Clean History**: Organized commits at natural breakpoints
 
 ## License
 
 MIT
+
+## Contributing
+
+This is a personal tool, but feel free to fork and adapt it for your needs!
