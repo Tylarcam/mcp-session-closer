@@ -2,6 +2,10 @@
 
 A Model Context Protocol (MCP) server for Cursor that gracefully closes work sessions, syncs context files, updates Agent OS files, and commits changes to git.
 
+<a href="https://glama.ai/mcp/servers/@Tylarcam/mcp-session-closer">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@Tylarcam/mcp-session-closer/badge" alt="Session Closer MCP server" />
+</a>
+
 ## Features
 
 * **end_session**: Close Cursor sessions with automatic context sync and git commit
