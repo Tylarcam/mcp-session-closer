@@ -34,7 +34,7 @@ export class SessionCloser {
     filesUpdated.push('.agent-os/session-summary.md');
 
     // 1.5. Create Notion database entry (after summary is updated)
-    await this.createNotionEntry();
+    await this.createNotionEntry(summary);
 
     // 2. Update Agent OS files if they exist
     const agentOSUpdates = await this.updateAgentOSFiles(summary);
@@ -516,10 +516,10 @@ ${summary.filesChanged.map(f => `- ${f}`).join('\n')}
    * Non-blocking: logs errors but doesn't fail session close
    * Falls back to Python script if MCP fails
    */
-  private async createNotionEntry(): Promise<void> {
+  private async createNotionEntry(summary?: SessionSummary): Promise<void> {
     // Try MCP first, fallback to Python script
     try {
-      await this.createNotionEntryViaMCP();
+      await this.createNotionEntryViaMCP(summary);
     } catch (mcpError: any) {
       console.warn('⚠️ Notion MCP failed, falling back to Python script:', mcpError.message);
       await this.createNotionEntryViaPython();
@@ -529,7 +529,7 @@ ${summary.filesChanged.map(f => `- ${f}`).join('\n')}
   /**
    * Create Notion entry using MCP tools
    */
-  private async createNotionEntryViaMCP(): Promise<void> {
+  private async createNotionEntryViaMCP(summary?: SessionSummary): Promise<void> {
     try {
       // Get configuration
       const pageId = process.env.NOTION_PAGE_ID;
@@ -546,14 +546,6 @@ ${summary.filesChanged.map(f => `- ${f}`).join('\n')}
         throw new Error('Neither NOTION_PAGE_ID nor NOTION_DATABASE_ID configured');
       }
 
-      // Read latest session summary
-      const summaryPath = path.join(this.projectRoot, '.agent-os', 'session-summary.md');
-      const summaryContent = await this.readFileIfExists(summaryPath);
-
-      if (!summaryContent) {
-        throw new Error('No session summary found');
-      }
-
       // Initialize Notion MCP client
       const notionClient = new NotionMCPClient();
       
@@ -562,16 +554,23 @@ ${summary.filesChanged.map(f => `- ${f}`).join('\n')}
 
       await notionClient.connect();
 
-      // Format summary as Notion blocks
-      const blocks = this.formatSummaryAsNotionBlocks(summaryContent);
-
       if (pageId) {
         // Append to existing page (preferred - avoids parent serialization)
-        await notionClient.appendBlocks(pageId, blocks);
-        console.log('✅ Notion entry appended to page successfully');
+        // Read latest session summary for blocks
+        const summaryPath = path.join(this.projectRoot, '.agent-os', 'session-summary.md');
+        const summaryContent = await this.readFileIfExists(summaryPath);
+        
+        if (summaryContent) {
+          const blocks = this.formatSummaryAsNotionBlocks(summaryContent);
+          await notionClient.appendBlocks(pageId, blocks);
+          console.log('✅ Notion entry appended to page successfully');
+        }
       } else if (databaseId) {
-        // Create new page in database
-        const properties = this.createPagePropertiesFromSummary(summaryContent);
+        // Create new page in database with proper properties
+        const properties = summary 
+          ? this.createPagePropertiesFromSummary(summary)
+          : await this.createPagePropertiesFromSummaryFile();
+        
         await notionClient.createPage(
           { type: 'database_id', database_id: databaseId },
           properties
@@ -657,38 +656,214 @@ ${summary.filesChanged.map(f => `- ${f}`).join('\n')}
   }
 
   /**
-   * Create Notion page properties from session summary
-   * Extracts title and other metadata for database entry
+   * Create Notion page properties from SessionSummary object
+   * Matches the exact format required by the Notion API for Daily Task Session Tracker database
    */
-  private createPagePropertiesFromSummary(summaryContent: string): any {
-    // Extract session title (first heading or first line)
-    const lines = summaryContent.split('\n');
-    let title = 'Session Summary';
-    
-    for (const line of lines) {
-      if (line.startsWith('## Session:')) {
-        title = line.replace('## Session:', '').trim();
-        break;
-      } else if (line.startsWith('#')) {
-        title = line.replace(/^#+\s*/, '').trim();
-        break;
-      } else if (line.trim() && !line.startsWith('-') && !line.startsWith('*')) {
-        title = line.trim();
-        break;
-      }
-    }
+  private createPagePropertiesFromSummary(summary: SessionSummary): any {
+    // Extract session title from accomplishments or use default
+    const title = summary.accomplishments && summary.accomplishments.length > 0
+      ? summary.accomplishments[0]
+      : 'Session Summary';
 
-    // Create properties object (adjust based on your database schema)
-    return {
-      'Title': {
+    // Format date from timestamp (YYYY-MM-DD format)
+    const dateStr = summary.timestamp 
+      ? new Date(summary.timestamp).toISOString().split('T')[0]
+      : new Date().toISOString().split('T')[0];
+
+    // Helper function to join array items into rich_text
+    const joinAsRichText = (items: string[]): any => {
+      if (!items || items.length === 0) {
+        return [];
+      }
+      return [{
+        text: {
+          content: items.join('\n')
+        }
+      }];
+    };
+
+    // Build properties object matching exact Notion API format
+    const properties: any = {
+      'Session Title': {
         title: [{
           text: {
             content: title
           }
         }]
       },
-      // Add more properties as needed based on your Notion database schema
+      'Date': {
+        date: {
+          start: dateStr
+        }
+      },
+      'Complete': {
+        checkbox: false
+      },
+      'Follow-up Required': {
+        checkbox: false
+      }
     };
+
+    // Add Accomplishments if present
+    if (summary.accomplishments && summary.accomplishments.length > 0) {
+      properties['Accomplishments'] = {
+        rich_text: joinAsRichText(summary.accomplishments)
+      };
+    }
+
+    // Add Next Steps if present
+    if (summary.nextSteps && summary.nextSteps.length > 0) {
+      properties['Next Steps'] = {
+        rich_text: joinAsRichText(summary.nextSteps)
+      };
+    }
+
+    // Add Blockers if present
+    if (summary.blockers && summary.blockers.length > 0) {
+      properties['Blockers'] = {
+        rich_text: joinAsRichText(summary.blockers)
+      };
+    }
+
+    // Add Decisions Made if present
+    if (summary.decisions && summary.decisions.length > 0) {
+      const decisionsText = summary.decisions.map(d => d.details).join('\n');
+      properties['Decisions Made'] = {
+        rich_text: [{
+          text: {
+            content: decisionsText
+          }
+        }]
+      };
+    }
+
+    // Add Files Changed if present
+    if (summary.filesChanged && summary.filesChanged.length > 0) {
+      properties['Files Changed'] = {
+        rich_text: joinAsRichText(summary.filesChanged)
+      };
+    }
+
+    // Project can be set via environment variable or default to "Development"
+    const project = process.env.NOTION_PROJECT || 'Development';
+    // Validate project is one of the allowed values
+    const validProjects = [
+      'Dissertation', 'Research', 'Work', 'Personal', 'Instruction',
+      'Side Project', 'Consulting', 'Administrative', 'Development', 'Planning'
+    ];
+    const validProject = validProjects.includes(project) ? project : 'Development';
+    
+    properties['Project'] = {
+      select: {
+        name: validProject
+      }
+    };
+
+    return properties;
+  }
+
+  /**
+   * Create Notion page properties from summary file (fallback when summary object not available)
+   */
+  private async createPagePropertiesFromSummaryFile(): Promise<any> {
+    const summaryPath = path.join(this.projectRoot, '.agent-os', 'session-summary.md');
+    const summaryContent = await this.readFileIfExists(summaryPath);
+    
+    if (!summaryContent) {
+      throw new Error('No session summary found');
+    }
+
+    // Parse summary from markdown content
+    const summary = this.parseSummaryFromContent(summaryContent);
+    
+    // Convert to SessionSummary format
+    const sessionSummary: SessionSummary = {
+      timestamp: summary.timestamp,
+      accomplishments: summary.accomplishments,
+      decisions: summary.decisions,
+      blockers: summary.blockers,
+      nextSteps: summary.nextSteps,
+      filesChanged: summary.filesChanged
+    };
+
+    return this.createPagePropertiesFromSummary(sessionSummary);
+  }
+
+  /**
+   * Parse session summary from markdown content
+   * Extracts accomplishments, decisions, blockers, next steps, and files changed
+   */
+  private parseSummaryFromContent(content: string): {
+    timestamp: string;
+    accomplishments: string[];
+    decisions: Decision[];
+    blockers: string[];
+    nextSteps: string[];
+    filesChanged: string[];
+  } {
+    const lines = content.split('\n');
+    const result = {
+      timestamp: new Date().toISOString(),
+      accomplishments: [] as string[],
+      decisions: [] as Decision[],
+      blockers: [] as string[],
+      nextSteps: [] as string[],
+      filesChanged: [] as string[]
+    };
+
+    let currentSection = '';
+    
+    for (const line of lines) {
+      const trimmed = line.trim();
+      
+      if (trimmed.startsWith('### Accomplishments')) {
+        currentSection = 'accomplishments';
+        continue;
+      } else if (trimmed.startsWith('### Decisions Made') || trimmed.startsWith('### Key Decisions')) {
+        currentSection = 'decisions';
+        continue;
+      } else if (trimmed.startsWith('### Blockers')) {
+        currentSection = 'blockers';
+        continue;
+      } else if (trimmed.startsWith('### Next Steps') || trimmed.startsWith('### Next Steps')) {
+        currentSection = 'nextSteps';
+        continue;
+      } else if (trimmed.startsWith('### Files Changed') || trimmed.startsWith('### Changed Files')) {
+        currentSection = 'filesChanged';
+        continue;
+      } else if (trimmed.startsWith('##') || trimmed.startsWith('#')) {
+        currentSection = '';
+        continue;
+      }
+
+      if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        const item = trimmed.substring(2).trim();
+        if (currentSection === 'accomplishments' && item) {
+          result.accomplishments.push(item);
+        } else if (currentSection === 'blockers' && item) {
+          result.blockers.push(item);
+        } else if (currentSection === 'nextSteps' && item) {
+          result.nextSteps.push(item);
+        } else if (currentSection === 'filesChanged' && item) {
+          result.filesChanged.push(item);
+        }
+      } else if (currentSection === 'decisions' && trimmed) {
+        // Decisions might be formatted as "- Decision text" or just "Decision text"
+        const decisionText = trimmed.startsWith('- ') ? trimmed.substring(2).trim() : trimmed;
+        if (decisionText) {
+          result.decisions.push({
+            date: new Date().toISOString().split('T')[0],
+            status: 'Active',
+            details: decisionText,
+            context: 'From session summary',
+            rationale: '',
+            consequences: []
+          });
+        }
+      }
+    }
+
+    return result;
   }
 
   /**
