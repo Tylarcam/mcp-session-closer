@@ -4,9 +4,10 @@ A Model Context Protocol (MCP) server for Cursor that gracefully closes work ses
 
 ## Features
 
-* **end_session**: Close Cursor sessions with automatic context sync and git commit
+* **end_session**: Close Cursor sessions with automatic context sync, Notion entry creation, and git commit
 * **sync_context_files**: Sync context files across `claude.md`, `gemini.md`, `agents.md`, and `.cursor/context.md`
 * **update_session_summary**: Update session summaries without closing the session
+* **Notion Integration**: Automatically creates Notion entries via MCP tools (with Python script fallback)
 
 ## Quick Setup
 
@@ -67,9 +68,10 @@ Use end_session with conversationSummary: "Implemented user auth, fixed login bu
 The server will:
 1. Extract session details (accomplishments, decisions, blockers, next steps)
 2. Update `.agent-os/session-summary.md`
-3. Update Agent OS roadmap and decisions (if present)
-4. Sync all context files (`claude.md`, `gemini.md`, `agents.md`, `.cursor/context.md`)
-5. Commit all changes to git with descriptive message
+3. Create Notion entry via MCP (or fallback to Python script)
+4. Update Agent OS roadmap and decisions (if present)
+5. Sync all context files (`claude.md`, `gemini.md`, `agents.md`, `.cursor/context.md`)
+6. Commit all changes to git with descriptive message
 
 ### Sync Context Files Only
 
@@ -132,6 +134,33 @@ When you call `end_session`, the server automatically:
 
 * `CURSOR_WORKSPACE` - Set automatically by Cursor to the current workspace folder
 
+### Notion Integration
+
+The server can automatically create Notion entries when closing sessions. Configure via environment variables:
+
+**Required:**
+* `NOTION_API_TOKEN` or `NOTION_API_KEY` - Your Notion integration token (get from https://www.notion.so/my-integrations)
+
+**Choose one:**
+* `NOTION_PAGE_ID` - Append blocks to existing page (recommended, avoids serialization issues)
+* `NOTION_DATABASE_ID` - Create new page in database
+
+**Example:**
+```bash
+export NOTION_API_TOKEN="ntn_your_token_here"
+export NOTION_PAGE_ID="475bc2317d1d43f29345c9fd0e9468af"
+```
+
+**How it works:**
+1. **Primary**: Uses Notion MCP tools via Docker (`mcp/notion:latest`)
+2. **Fallback**: If MCP fails, falls back to Python script (if available)
+
+**MCP Integration:**
+- Connects to Notion MCP server via Docker stdio transport
+- Uses `append-blocks` tool (preferred) or `create-page` tool
+- Handles parameter serialization correctly
+- Non-blocking: errors don't fail session close
+
 ### Optional Files
 
 The server works with or without these files:
@@ -191,6 +220,15 @@ npm start
 * Verify write permissions in the workspace
 * Look for errors in Cursor's MCP logs
 
+### Notion Entry Not Creating
+
+* Verify `NOTION_API_TOKEN` is set correctly
+* Check that `NOTION_PAGE_ID` or `NOTION_DATABASE_ID` is configured
+* Ensure Docker can run `mcp/notion:latest` container
+* Check Docker logs: `docker logs mcp-notion` (if running as container)
+* Verify Notion integration has access to the target page/database
+* If MCP fails, check if Python fallback script exists and is executable
+
 ## Project Structure
 
 ```
@@ -198,10 +236,13 @@ mcp-session-closer/
 ├── src/
 │   ├── index.ts          # MCP server implementation
 │   ├── session-closer.ts # Core session closing logic
+│   ├── notion-client.ts  # Notion MCP client wrapper
 │   └── types.ts          # TypeScript type definitions
 ├── dist/                 # Compiled JavaScript (generated)
 ├── package.json          # Node.js dependencies
 ├── tsconfig.json         # TypeScript configuration
+├── Dockerfile            # Docker build configuration
+├── docker-compose.yml    # Docker Compose configuration
 └── README.md            # This file
 ```
 

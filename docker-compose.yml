@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  mcp-session-closer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mcp-session-closer:latest
+    container_name: mcp-session-closer
+    # MCP servers communicate via stdio, so we use stdin_open and tty
+    stdin_open: true
+    tty: true
+    # Mount workspace directory (adjust path as needed)
+    volumes:
+      - ${CURSOR_WORKSPACE:-./workspace}:/workspace:rw
+    environment:
+      - CURSOR_WORKSPACE=/workspace
+      - NODE_ENV=production
+    # Keep container running
+    restart: unless-stopped
+    # No ports needed - communicates via stdio
+

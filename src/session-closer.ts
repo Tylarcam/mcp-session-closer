@@ -1,8 +1,10 @@
 import * as fs from 'fs/promises';
+import { existsSync } from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import type { SessionSummary, ProjectContext, Decision, AgentOSFiles } from './types.js';
+import { NotionMCPClient, type NotionBlock } from './notion-client.js';
 
 const execAsync = promisify(exec);
 
@@ -30,6 +32,9 @@ export class SessionCloser {
     // 1. Update session summary file
     await this.updateSessionSummary(summary);
     filesUpdated.push('.agent-os/session-summary.md');
+
+    // 1.5. Create Notion database entry (after summary is updated)
+    await this.createNotionEntry();
 
     // 2. Update Agent OS files if they exist
     const agentOSUpdates = await this.updateAgentOSFiles(summary);
@@ -504,6 +509,207 @@ ${summary.filesChanged.map(f => `- ${f}`).join('\n')}
     } catch (error) {
       // Silently fail if decisions file doesn't exist or can't be updated
     }
+  }
+
+  /**
+   * Create Notion entry from latest session summary using MCP
+   * Non-blocking: logs errors but doesn't fail session close
+   * Falls back to Python script if MCP fails
+   */
+  private async createNotionEntry(): Promise<void> {
+    // Try MCP first, fallback to Python script
+    try {
+      await this.createNotionEntryViaMCP();
+    } catch (mcpError: any) {
+      console.warn('⚠️ Notion MCP failed, falling back to Python script:', mcpError.message);
+      await this.createNotionEntryViaPython();
+    }
+  }
+
+  /**
+   * Create Notion entry using MCP tools
+   */
+  private async createNotionEntryViaMCP(): Promise<void> {
+    try {
+      // Get configuration
+      const pageId = process.env.NOTION_PAGE_ID;
+      const databaseId = process.env.NOTION_DATABASE_ID;
+      const notionKey = process.env.NOTION_API_KEY || 
+                       process.env.NOTION_TOKEN ||
+                       await this.getNotionKeyFromKeysFile(this.projectRoot);
+
+      if (!notionKey) {
+        throw new Error('Notion API key not found');
+      }
+
+      if (!pageId && !databaseId) {
+        throw new Error('Neither NOTION_PAGE_ID nor NOTION_DATABASE_ID configured');
+      }
+
+      // Read latest session summary
+      const summaryPath = path.join(this.projectRoot, '.agent-os', 'session-summary.md');
+      const summaryContent = await this.readFileIfExists(summaryPath);
+
+      if (!summaryContent) {
+        throw new Error('No session summary found');
+      }
+
+      // Initialize Notion MCP client
+      const notionClient = new NotionMCPClient();
+      
+      // Set API token in environment for Docker container
+      process.env.NOTION_API_TOKEN = notionKey;
+
+      await notionClient.connect();
+
+      // Format summary as Notion blocks
+      const blocks = this.formatSummaryAsNotionBlocks(summaryContent);
+
+      if (pageId) {
+        // Append to existing page (preferred - avoids parent serialization)
+        await notionClient.appendBlocks(pageId, blocks);
+        console.log('✅ Notion entry appended to page successfully');
+      } else if (databaseId) {
+        // Create new page in database
+        const properties = this.createPagePropertiesFromSummary(summaryContent);
+        await notionClient.createPage(
+          { type: 'database_id', database_id: databaseId },
+          properties
+        );
+        console.log('✅ Notion entry created in database successfully');
+      }
+
+      await notionClient.close();
+    } catch (error: any) {
+      throw new Error(`MCP Notion entry creation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Fallback: Create Notion entry using Python script
+   */
+  private async createNotionEntryViaPython(): Promise<void> {
+    try {
+      const workspace = process.env.CURSOR_WORKSPACE || this.projectRoot;
+      const scriptPath = path.join(
+        workspace,
+        'Automation',
+        'scripts',
+        'create_daily_task_session_from_summary.py'
+      );
+
+      // Check if script exists
+      if (!existsSync(scriptPath)) {
+        console.log('Notion entry script not found, skipping...');
+        return;
+      }
+
+      // Get Notion API key from environment or keys.txt
+      const notionKey = process.env.NOTION_API_KEY || 
+                       process.env.NOTION_TOKEN ||
+                       await this.getNotionKeyFromKeysFile(workspace);
+
+      if (!notionKey) {
+        console.log('Notion API key not found, skipping entry creation...');
+        return;
+      }
+
+      // Set environment variable for script
+      const env = {
+        ...process.env,
+        NOTION_API_KEY: notionKey
+      };
+
+      // Determine Python command (python3 on Unix, python on Windows)
+      const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+
+      // Run Python script (non-blocking, with timeout)
+      const result = await execAsync(
+        `${pythonCmd} "${scriptPath}"`,
+        { 
+          cwd: workspace,
+          env: env,
+          timeout: 30000, // 30 second timeout
+          maxBuffer: 10 * 1024 * 1024 // 10MB buffer
+        }
+      );
+
+      if (result.stdout) {
+        console.log('Notion entry creation output:', result.stdout);
+      }
+      if (result.stderr) {
+        console.warn('Notion entry creation warnings:', result.stderr);
+      }
+
+      console.log('✅ Notion entry created successfully (via Python script)');
+    } catch (error: any) {
+      // Non-blocking: log error but don't fail session close
+      console.warn('⚠️ Failed to create Notion entry (Python fallback):', error.message);
+    }
+  }
+
+  /**
+   * Format session summary markdown as Notion blocks
+   */
+  private formatSummaryAsNotionBlocks(summaryContent: string): NotionBlock[] {
+    // Use the static method from NotionMCPClient
+    return NotionMCPClient.markdownToBlocks(summaryContent);
+  }
+
+  /**
+   * Create Notion page properties from session summary
+   * Extracts title and other metadata for database entry
+   */
+  private createPagePropertiesFromSummary(summaryContent: string): any {
+    // Extract session title (first heading or first line)
+    const lines = summaryContent.split('\n');
+    let title = 'Session Summary';
+    
+    for (const line of lines) {
+      if (line.startsWith('## Session:')) {
+        title = line.replace('## Session:', '').trim();
+        break;
+      } else if (line.startsWith('#')) {
+        title = line.replace(/^#+\s*/, '').trim();
+        break;
+      } else if (line.trim() && !line.startsWith('-') && !line.startsWith('*')) {
+        title = line.trim();
+        break;
+      }
+    }
+
+    // Create properties object (adjust based on your database schema)
+    return {
+      'Title': {
+        title: [{
+          text: {
+            content: title
+          }
+        }]
+      },
+      // Add more properties as needed based on your Notion database schema
+    };
+  }
+
+  /**
+   * Read Notion API key from keys.txt file in workspace root
+   */
+  private async getNotionKeyFromKeysFile(workspace: string): Promise<string | null> {
+    try {
+      const keysPath = path.join(workspace, 'keys.txt');
+      if (!existsSync(keysPath)) {
+        return null;
+      }
+
+      const content = await fs.readFile(keysPath, 'utf-8');
+      const match = content.match(/NOTION_API_KEY\s*=\s*([^\n]+)/);
+      if (match) {
+        return match[1].trim().replace(/^["']|["']$/g, '');
+      }
+    } catch (error) {
+      // Ignore errors silently
+    }
+    return null;
   }
 }
 
