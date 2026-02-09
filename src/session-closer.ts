@@ -571,6 +571,15 @@ ${summary.filesChanged.map(f => `- ${f}`).join('\n')}
           ? this.createPagePropertiesFromSummary(summary)
           : await this.createPagePropertiesFromSummaryFile();
         
+        // Inspect MCP tool configuration if debug mode is enabled
+        if (process.env.DEBUG_NOTION) {
+          try {
+            await notionClient.inspectCreatePageTool();
+          } catch (e) {
+            console.warn('Could not inspect MCP tool:', e);
+          }
+        }
+        
         await notionClient.createPage(
           { type: 'database_id', database_id: databaseId },
           properties
@@ -885,6 +894,141 @@ ${summary.filesChanged.map(f => `- ${f}`).join('\n')}
       // Ignore errors silently
     }
     return null;
+  }
+
+  /**
+   * Create a Notion entry from markdown content
+   * Public method that can be called from MCP tools
+   * 
+   * @param markdownContent - The markdown content to add to Notion
+   * @param options - Configuration options
+   * @returns Created page ID and success status
+   */
+  async createNotionEntryFromMarkdown(
+    markdownContent: string,
+    options?: {
+      pageId?: string;
+      databaseId?: string;
+      title?: string;
+      date?: string;
+      project?: string;
+    }
+  ): Promise<{ success: boolean; pageId?: string; error?: string }> {
+    try {
+      const notionKey = process.env.NOTION_API_TOKEN || 
+                       process.env.NOTION_API_KEY || 
+                       process.env.NOTION_TOKEN ||
+                       await this.getNotionKeyFromKeysFile(this.projectRoot);
+
+      if (!notionKey) {
+        throw new Error('Notion API key not found. Set NOTION_API_TOKEN, NOTION_API_KEY, or NOTION_TOKEN environment variable.');
+      }
+
+      const pageId = options?.pageId || process.env.NOTION_PAGE_ID;
+      const databaseId = options?.databaseId || process.env.NOTION_DATABASE_ID;
+
+      if (!pageId && !databaseId) {
+        throw new Error('Either pageId or databaseId must be provided (via options or NOTION_PAGE_ID/NOTION_DATABASE_ID environment variable).');
+      }
+
+      // Initialize Notion MCP client
+      const notionClient = new NotionMCPClient();
+      process.env.NOTION_API_TOKEN = notionKey;
+      await notionClient.connect();
+
+      let createdPageId: string | undefined;
+
+      if (pageId) {
+        // Append blocks to existing page
+        const blocks = this.formatSummaryAsNotionBlocks(markdownContent);
+        await notionClient.appendBlocks(pageId, blocks);
+        createdPageId = pageId;
+      } else if (databaseId) {
+        // Create new page in database
+        const title = options?.title || this.extractTitleFromMarkdown(markdownContent);
+        const dateStr = options?.date || this.extractDateFromMarkdown(markdownContent) || new Date().toISOString().split('T')[0];
+        const project = options?.project || process.env.NOTION_PROJECT || 'Development';
+
+        const properties = {
+          'Session Title': {
+            title: [{
+              text: {
+                content: title
+              }
+            }]
+          },
+          'Date': {
+            date: {
+              start: dateStr
+            }
+          },
+          'Complete': {
+            checkbox: false
+          },
+          'Follow-up Required': {
+            checkbox: false
+          },
+          'Project': {
+            select: {
+              name: project
+            }
+          }
+        };
+
+        const result = await notionClient.createPage(
+          { type: 'database_id', database_id: databaseId },
+          properties
+        );
+
+        // Extract page ID from result
+        try {
+          const resultContent = typeof result.content === 'string' 
+            ? JSON.parse(result.content) 
+            : result.content;
+          const resultData = typeof resultContent[0]?.text === 'string'
+            ? JSON.parse(resultContent[0].text)
+            : resultContent[0]?.text || resultContent;
+          
+          createdPageId = resultData?.id || resultData?.object?.id;
+        } catch (e) {
+          // If we can't extract the ID, we'll still try to append
+        }
+
+        // Append content blocks to the created page
+        if (createdPageId) {
+          const blocks = this.formatSummaryAsNotionBlocks(markdownContent);
+          await notionClient.appendBlocks(createdPageId, blocks);
+        }
+      }
+
+      await notionClient.close();
+
+      return {
+        success: true,
+        pageId: createdPageId
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Extract title from markdown (first H1)
+   */
+  private extractTitleFromMarkdown(markdown: string): string {
+    const titleMatch = markdown.match(/^#\s+(.+)$/m);
+    return titleMatch ? titleMatch[1].trim() : 'New Entry';
+  }
+
+  /**
+   * Extract date from markdown
+   */
+  private extractDateFromMarkdown(markdown: string): string | null {
+    const dateMatch = markdown.match(/\*\*Date\*\*:\s*(.+?)(?:\n|$)/i);
+    return dateMatch ? dateMatch[1].trim() : null;
   }
 }
 

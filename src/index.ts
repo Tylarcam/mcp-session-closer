@@ -96,6 +96,40 @@ class SessionCloserMCPServer {
               required: ['summary'],
             },
           },
+          {
+            name: 'create_notion_entry',
+            description: 'Create a new Notion entry from markdown content. Can append to an existing page or create a new page in a database. Automatically handles chunking for large content (Notion limit: 100 blocks per request).',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                markdownContent: {
+                  type: 'string',
+                  description: 'The markdown content to add to Notion. Will be converted to Notion blocks.',
+                },
+                pageId: {
+                  type: 'string',
+                  description: 'Notion page ID to append blocks to. If provided, content will be appended to this page. If not provided, will use NOTION_PAGE_ID environment variable.',
+                },
+                databaseId: {
+                  type: 'string',
+                  description: 'Notion database ID to create a new page in. If provided, a new page will be created. If not provided, will use NOTION_DATABASE_ID environment variable. Either pageId or databaseId must be provided.',
+                },
+                title: {
+                  type: 'string',
+                  description: 'Title for the new page (only used when creating in database). If not provided, will extract from first H1 in markdown.',
+                },
+                date: {
+                  type: 'string',
+                  description: 'Date for the entry in YYYY-MM-DD format (only used when creating in database). If not provided, will extract from markdown or use today\'s date.',
+                },
+                project: {
+                  type: 'string',
+                  description: 'Project name for the entry (only used when creating in database). If not provided, will use NOTION_PROJECT environment variable or default to "Development".',
+                },
+              },
+              required: ['markdownContent'],
+            },
+          },
         ],
       };
     });
@@ -179,6 +213,54 @@ class SessionCloserMCPServer {
                 },
               ],
             };
+          }
+
+          case 'create_notion_entry': {
+            const markdownContent = args.markdownContent as string;
+            if (!markdownContent) {
+              throw new Error('markdownContent is required');
+            }
+
+            const result = await this.sessionCloser.createNotionEntryFromMarkdown(
+              markdownContent,
+              {
+                pageId: args.pageId as string | undefined,
+                databaseId: args.databaseId as string | undefined,
+                title: args.title as string | undefined,
+                date: args.date as string | undefined,
+                project: args.project as string | undefined,
+              }
+            );
+
+            if (result.success) {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      success: true,
+                      pageId: result.pageId,
+                      message: result.pageId 
+                        ? `Notion entry created/updated successfully! Page ID: ${result.pageId}`
+                        : 'Notion entry created successfully!',
+                    }, null, 2),
+                  },
+                ],
+              };
+            } else {
+              return {
+                content: [
+                  {
+                    type: 'text',
+                    text: JSON.stringify({
+                      success: false,
+                      error: result.error,
+                    }, null, 2),
+                  },
+                ],
+                isError: true,
+              };
+            }
           }
 
           default:

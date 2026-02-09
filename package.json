@@ -1,6 +1,6 @@
 {
   "name": "mcp-session-closer",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Personal MCP server for closing Cursor sessions and syncing project files",
   "main": "dist/index.js",
   "type": "module",

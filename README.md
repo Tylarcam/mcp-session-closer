@@ -7,6 +7,7 @@ A Model Context Protocol (MCP) server for Cursor that gracefully closes work ses
 * **end_session**: Close Cursor sessions with automatic context sync, Notion entry creation, and git commit
 * **sync_context_files**: Sync context files across `claude.md`, `gemini.md`, `agents.md`, and `.cursor/context.md`
 * **update_session_summary**: Update session summaries without closing the session
+* **create_notion_entry**: Create Notion entries from markdown content (append to page or create in database)
 * **Notion Integration**: Automatically creates Notion entries via MCP tools (with Python script fallback)
 
 ## Quick Setup
@@ -91,6 +92,32 @@ Use sync_context_files
 Use update_session_summary with summary: "Made progress on feature X"
 ```
 
+### Create Notion Entry from Markdown
+
+Create a Notion entry directly from markdown content. This is useful for adding completion reports, documentation, or any structured content to Notion.
+
+**Append to existing page:**
+```
+Use create_notion_entry with markdownContent: "# My Report\n\nContent here..." and pageId: "your-page-id"
+```
+
+**Create new page in database:**
+```
+Use create_notion_entry with markdownContent: "# My Report\n\nContent here..." and databaseId: "your-database-id"
+```
+
+**With custom title and date:**
+```
+Use create_notion_entry with markdownContent: "# My Report\n\nContent here...", databaseId: "your-database-id", title: "Custom Title", date: "2026-02-08", project: "Development"
+```
+
+**Features:**
+- Automatically converts markdown to Notion blocks
+- Handles large content by chunking (Notion limit: 100 blocks per request)
+- Extracts title from first H1 if not provided
+- Extracts date from markdown if present
+- Falls back to direct Notion API if MCP tools unavailable
+
 ## How It Works
 
 ### Session Closing Flow
@@ -136,24 +163,31 @@ When you call `end_session`, the server automatically:
 
 ### Notion Integration
 
-The server can automatically create Notion entries when closing sessions. Configure via environment variables:
+The server can automatically create Notion entries when closing sessions, and you can also create entries manually using the `create_notion_entry` tool. Configure via environment variables:
 
 **Required:**
-* `NOTION_API_TOKEN` or `NOTION_API_KEY` - Your Notion integration token (get from https://www.notion.so/my-integrations)
+* `NOTION_API_TOKEN` or `NOTION_API_KEY` or `NOTION_TOKEN` - Your Notion integration token (get from https://www.notion.so/my-integrations)
 
-**Choose one:**
+**Choose one (for automatic session entries):**
 * `NOTION_PAGE_ID` - Append blocks to existing page (recommended, avoids serialization issues)
 * `NOTION_DATABASE_ID` - Create new page in database
+
+**Optional:**
+* `NOTION_PROJECT` - Default project name for database entries (default: "Development")
 
 **Example:**
 ```bash
 export NOTION_API_TOKEN="ntn_your_token_here"
-export NOTION_PAGE_ID="475bc2317d1d43f29345c9fd0e9468af"
+export NOTION_DATABASE_ID="2ba968fc-73c0-8045-b1c7-c89951ece547"
+export NOTION_PROJECT="Development"
 ```
 
 **How it works:**
 1. **Primary**: Uses Notion MCP tools via Docker (`mcp/notion:latest`)
-2. **Fallback**: If MCP fails, falls back to Python script (if available)
+2. **Fallback**: If MCP fails, falls back to direct Notion API calls
+3. **Chunking**: Automatically handles large content by splitting into chunks of 100 blocks (Notion API limit)
+
+**Note**: When using `create_notion_entry` tool, you can override environment variables by passing `pageId`, `databaseId`, `title`, `date`, or `project` as parameters.
 
 **MCP Integration:**
 - Connects to Notion MCP server via Docker stdio transport

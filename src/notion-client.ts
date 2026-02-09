@@ -104,8 +104,41 @@ export class NotionMCPClient {
   }
 
   /**
+   * List available MCP tools and their schemas for debugging
+   */
+  async listTools(): Promise<any> {
+    if (!this.connected || !this.client) {
+      await this.connect();
+    }
+
+    try {
+      const tools = await this.client!.listTools();
+      return tools;
+    } catch (error: any) {
+      throw new Error(`Failed to list tools: ${error.message}`);
+    }
+  }
+
+  /**
+   * Inspect the create_page tool schema to verify expected parameters
+   */
+  async inspectCreatePageTool(): Promise<any> {
+    const tools = await this.listTools();
+    const createPageTool = tools.tools?.find((t: any) => t.name === 'create_page' || t.name === 'create-page');
+    
+    if (createPageTool) {
+      console.log('📋 create_page tool schema:', JSON.stringify(createPageTool, null, 2));
+    } else {
+      console.log('⚠️ create_page tool not found. Available tools:', tools.tools?.map((t: any) => t.name));
+    }
+    
+    return createPageTool;
+  }
+
+  /**
    * Append blocks to an existing Notion page
    * This avoids the parent serialization issue by using page_id directly
+   * Handles chunking for large block arrays (Notion limit: 100 blocks per request)
    */
   async appendBlocks(pageId: string, blocks: NotionBlock[]): Promise<any> {
     if (!this.connected || !this.client) {
@@ -121,20 +154,61 @@ export class NotionMCPClient {
         ? JSON.parse(blocks) 
         : blocks;
 
-      const result = await this.client!.callTool({
-        name: 'append_blocks',
-        arguments: {
-          page_id: formattedPageId,
-          blocks: blocksArray
-        }
-      });
+      // Notion API has a limit of 100 blocks per request
+      const chunkSize = 100;
+      const results = [];
 
-      if (result.isError) {
-        const errorContent = result.content as Array<{ type: string; text?: string }>;
-        throw new Error(errorContent[0]?.text || 'Unknown error');
+      for (let i = 0; i < blocksArray.length; i += chunkSize) {
+        const chunk = blocksArray.slice(i, i + chunkSize);
+        
+        try {
+          const result = await this.client!.callTool({
+            name: 'append_blocks',
+            arguments: {
+              page_id: formattedPageId,
+              blocks: chunk
+            }
+          });
+
+          if (result.isError) {
+            const errorContent = result.content as Array<{ type: string; text?: string }>;
+            throw new Error(errorContent[0]?.text || 'Unknown error');
+          }
+
+          results.push(result);
+        } catch (mcpError: any) {
+          // If MCP tool fails, try direct API
+          const notionToken = process.env.NOTION_API_TOKEN || 
+                             process.env.NOTION_API_KEY || 
+                             '';
+          
+          if (!notionToken) {
+            throw new Error('Notion API token not found for direct API call');
+          }
+
+          const response = await fetch(`https://api.notion.com/v1/blocks/${formattedPageId}/children`, {
+            method: 'PATCH',
+            headers: {
+              'Authorization': `Bearer ${notionToken}`,
+              'Content-Type': 'application/json',
+              'Notion-Version': '2022-06-28'
+            },
+            body: JSON.stringify({
+              children: chunk
+            })
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Notion API error (${response.status}): ${errorText}`);
+          }
+
+          const apiResult = await response.json();
+          results.push({ content: [{ type: 'text', text: JSON.stringify(apiResult) }] });
+        }
       }
 
-      return result;
+      return results.length === 1 ? results[0] : { content: [{ type: 'text', text: JSON.stringify({ chunks: results.length, totalBlocks: blocksArray.length }) }] };
     } catch (error: any) {
       throw new Error(`Failed to append blocks: ${error.message}`);
     }
@@ -143,6 +217,7 @@ export class NotionMCPClient {
   /**
    * Create a new page in a Notion database
    * Handles parent serialization correctly - ensures parent is a proper object, not a string
+   * Falls back to direct Notion API if MCP tool fails
    */
   async createPage(
     parent: NotionParent,
@@ -153,6 +228,13 @@ export class NotionMCPClient {
     }
 
     try {
+      // First, inspect the tool schema to understand expected format
+      try {
+        await this.inspectCreatePageTool();
+      } catch (e) {
+        // Ignore inspection errors
+      }
+
       // Ensure parent is properly structured as a plain object, not a string
       // Create a fresh plain object to avoid any serialization issues
       const parentObj: Record<string, string> = {
@@ -172,23 +254,91 @@ export class NotionMCPClient {
         ? JSON.parse(properties) 
         : properties;
 
-      // Call tool with plain objects - MCP SDK will handle JSON serialization
-      const result = await this.client!.callTool({
-        name: 'create_page',
-        arguments: {
-          parent: parentObj, // Plain object, will be serialized to JSON properly
-          properties: propertiesObj // Plain object, will be serialized to JSON properly
-        }
-      });
-
-      if (result.isError) {
-        const errorContent = result.content as Array<{ type: string; text?: string }>;
-        throw new Error(errorContent[0]?.text || 'Unknown error');
+      // Log what we're sending for debugging
+      if (process.env.DEBUG_NOTION) {
+        console.log('📤 Sending to MCP tool:', JSON.stringify({
+          name: 'create_page',
+          arguments: {
+            parent: parentObj,
+            properties: propertiesObj
+          }
+        }, null, 2));
       }
 
-      return result;
+      // Try MCP tool first
+      try {
+        const result = await this.client!.callTool({
+          name: 'create_page',
+          arguments: {
+            parent: parentObj, // Plain object, will be serialized to JSON properly
+            properties: propertiesObj // Plain object, will be serialized to JSON properly
+          }
+        });
+
+        if (result.isError) {
+          const errorContent = result.content as Array<{ type: string; text?: string }>;
+          const errorMsg = errorContent[0]?.text || 'Unknown error';
+          
+          // If MCP fails, try direct API
+          console.warn('⚠️ MCP tool failed, trying direct Notion API:', errorMsg);
+          return await this.createPageDirectAPI(parentObj, propertiesObj);
+        }
+
+        return result;
+      } catch (mcpError: any) {
+        // If MCP call fails, fall back to direct API
+        console.warn('⚠️ MCP tool call failed, trying direct Notion API:', mcpError.message);
+        return await this.createPageDirectAPI(parentObj, propertiesObj);
+      }
     } catch (error: any) {
       throw new Error(`Failed to create page: ${error.message}`);
+    }
+  }
+
+  /**
+   * Create page using direct Notion API (fallback when MCP tool fails)
+   */
+  private async createPageDirectAPI(
+    parent: Record<string, string>,
+    properties: NotionPageProperties
+  ): Promise<any> {
+    const notionToken = process.env.NOTION_API_TOKEN || 
+                       process.env.NOTION_API_KEY || 
+                       '';
+    
+    if (!notionToken) {
+      throw new Error('Notion API token not found for direct API call');
+    }
+
+    const requestBody = {
+      parent: parent,
+      properties: properties
+    };
+
+    if (process.env.DEBUG_NOTION) {
+      console.log('📤 Direct API request body:', JSON.stringify(requestBody, null, 2));
+    }
+
+    try {
+      const response = await fetch('https://api.notion.com/v1/pages', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${notionToken}`,
+          'Content-Type': 'application/json',
+          'Notion-Version': '2022-06-28'
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Notion API error (${response.status}): ${errorText}`);
+      }
+
+      const result = await response.json();
+      return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    } catch (error: any) {
+      throw new Error(`Direct Notion API call failed: ${error.message}`);
     }
   }
 

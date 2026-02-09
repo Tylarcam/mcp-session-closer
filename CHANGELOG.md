@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0] - 2026-02-09
+
+### Added
+- **New MCP Tool**: `create_notion_entry` - Create Notion entries from markdown content
+  - Supports appending to existing pages or creating new pages in databases
+  - Automatically handles chunking for large content (100 blocks per request)
+  - Extracts title and date from markdown if not provided
+  - Falls back to direct Notion API if MCP tools unavailable
+- **Enhanced Block Appending**: Added automatic chunking support in `NotionMCPClient.appendBlocks()` to handle Notion's 100 block limit
+- **Public API**: Added `SessionCloser.createNotionEntryFromMarkdown()` method for programmatic access
+
+### Improved
+- **Error Handling**: Better error messages and fallback handling for Notion operations
+- **Documentation**: Updated README with comprehensive `create_notion_entry` tool documentation
+
 ## [1.1.0] - 2026-02-08
 
 ### Added
