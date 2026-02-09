@@ -33,6 +33,26 @@ export class NotionMCPClient {
   }
 
   /**
+   * Format Notion ID to ensure it has proper hyphens
+   * Notion IDs should be in format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+   */
+  private formatNotionId(id: string): string {
+    if (!id) return id;
+    
+    // Remove any existing hyphens and whitespace
+    const cleanId = id.replace(/[-\s]/g, '');
+    
+    // Check if it's a valid UUID format (32 hex characters)
+    if (cleanId.length !== 32 || !/^[0-9a-fA-F]{32}$/.test(cleanId)) {
+      // If it's already formatted or doesn't match UUID format, return as-is
+      return id;
+    }
+    
+    // Format as: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    return `${cleanId.substring(0, 8)}-${cleanId.substring(8, 12)}-${cleanId.substring(12, 16)}-${cleanId.substring(16, 20)}-${cleanId.substring(20, 32)}`;
+  }
+
+  /**
    * Connect to Notion MCP server
    */
   async connect(): Promise<void> {
@@ -93,11 +113,19 @@ export class NotionMCPClient {
     }
 
     try {
+      // Format page ID with proper hyphens
+      const formattedPageId = this.formatNotionId(pageId);
+      
+      // Ensure blocks is a plain array, not stringified
+      const blocksArray = typeof blocks === 'string' 
+        ? JSON.parse(blocks) 
+        : blocks;
+
       const result = await this.client!.callTool({
         name: 'append_blocks',
         arguments: {
-          page_id: pageId,
-          blocks: blocks
+          page_id: formattedPageId,
+          blocks: blocksArray
         }
       });
 
@@ -114,7 +142,7 @@ export class NotionMCPClient {
 
   /**
    * Create a new page in a Notion database
-   * Handles parent serialization correctly
+   * Handles parent serialization correctly - ensures parent is a proper object, not a string
    */
   async createPage(
     parent: NotionParent,
@@ -125,22 +153,31 @@ export class NotionMCPClient {
     }
 
     try {
-      // Ensure parent is properly structured as an object, not a string
-      const parentObj: any = {
+      // Ensure parent is properly structured as a plain object, not a string
+      // Create a fresh plain object to avoid any serialization issues
+      const parentObj: Record<string, string> = {
         type: parent.type
       };
 
       if (parent.type === 'database_id' && parent.database_id) {
-        parentObj.database_id = parent.database_id;
+        // Format database ID with proper hyphens
+        parentObj.database_id = this.formatNotionId(parent.database_id);
       } else if (parent.type === 'page_id' && parent.page_id) {
-        parentObj.page_id = parent.page_id;
+        // Format page ID with proper hyphens
+        parentObj.page_id = this.formatNotionId(parent.page_id);
       }
 
+      // Ensure properties is also a plain object (not stringified)
+      const propertiesObj = typeof properties === 'string' 
+        ? JSON.parse(properties) 
+        : properties;
+
+      // Call tool with plain objects - MCP SDK will handle JSON serialization
       const result = await this.client!.callTool({
         name: 'create_page',
         arguments: {
-          parent: parentObj, // Pass as object, not string
-          properties: properties
+          parent: parentObj, // Plain object, will be serialized to JSON properly
+          properties: propertiesObj // Plain object, will be serialized to JSON properly
         }
       });
 
@@ -164,11 +201,19 @@ export class NotionMCPClient {
     }
 
     try {
+      // Format database ID with proper hyphens
+      const formattedDatabaseId = this.formatNotionId(databaseId);
+      
+      // Ensure filter is a plain object if provided
+      const filterObj = filter && typeof filter === 'string' 
+        ? JSON.parse(filter) 
+        : filter;
+
       const result = await this.client!.callTool({
         name: 'query_database',
         arguments: {
-          database_id: databaseId,
-          ...(filter && { filter })
+          database_id: formattedDatabaseId,
+          ...(filterObj && { filter: filterObj })
         }
       });
 
@@ -192,10 +237,13 @@ export class NotionMCPClient {
     }
 
     try {
+      // Format page ID with proper hyphens
+      const formattedPageId = this.formatNotionId(pageId);
+
       const result = await this.client!.callTool({
         name: 'get_block_children',
         arguments: {
-          block_id: pageId
+          block_id: formattedPageId
         }
       });
 
